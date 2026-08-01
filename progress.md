@@ -29,8 +29,10 @@ Instructions for me (human): skim this file any time I want to know exactly how 
 ## Phase 2: Async API Gateway & Token Bucket Rate Limiter
 - [ ] `app/main.py` FastAPI entry point created
 - [ ] TokenBucketRateLimiter implemented using `redis.asyncio`
+- [ ] `client_id` read from `X-Client-ID` header
 - [ ] `/health` endpoint working
 - [ ] `/v1/predict` endpoint working
+- [ ] `/v1/predict` implemented as synchronous hold-open (no polling endpoint in base)
 - [ ] Verified: exceeding rate limit returns HTTP 429
 - [ ] Verified: limit resets after time window
 
@@ -105,6 +107,9 @@ Instructions for me (human): skim this file any time I want to know exactly how 
 - [ ] Not started
 
 ### Stretch 3: Cache Staleness / Drift Handling
+- [ ] Not started
+
+### Stretch 4: Async Result Delivery
 - [ ] Not started
 
 ---

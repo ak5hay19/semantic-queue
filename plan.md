@@ -61,16 +61,18 @@ This is the diagram to keep open while building — every phase below maps to on
 - [ ] FastAPI entry point in `app/main.py`
 - [ ] Async `TokenBucketRateLimiter` using `redis.asyncio`
   - Key schema: `rate_limit:{client_id}`
+  - `client_id` is read from an `X-Client-ID` request header (used as the rate-limit key and general tenant identifier)
   - N tokens per time window (e.g. 100 req/min)
   - Return HTTP 429 when empty
 - [ ] `/health` and `/v1/predict` endpoints
+  - `/v1/predict` is synchronous: the request holds the connection open and awaits the worker's result (e.g. via Redis pub/sub or an internal asyncio Future keyed by `task_id`), returning the actual output in the same response. No separate result-polling endpoint in the base project — see Stretch 4.
 - **Done when:** hammering `/v1/predict` past the limit reliably returns 429, and it resets after the window.
 
 ## Phase 3: Redis Semantic Vector Cache
 - [ ] `app/cache.py`
   - Exact-string match check first (cheap)
   - If no exact match: embed with sentence-transformers (all-MiniLM-L6-v2)
-  - Cosine similarity check against cached vectors (NumPy)
+  - Cosine similarity check against cached vectors — brute-force in Python: embeddings stored as plain Redis values/hashes, candidates pulled back into the process and compared with NumPy (no RediSearch/Redis Stack vector module — plain Redis 7.x)
   - Threshold: 0.92 → CACHE_HIT, else CACHE_MISS
 - **Done when:** two differently-worded but semantically similar prompts hit the same cache entry; log clearly shows HIT vs MISS.
 
@@ -79,7 +81,7 @@ This is the diagram to keep open while building — every phase below maps to on
 - [ ] `workers/inference_worker.py`
   - Pop tasks with `BRPOP`
   - Dynamic batcher: batch_size=16 OR max_delay=20ms, whichever first
-  - Run batched forward pass in PyTorch
+  - Run batched forward pass in PyTorch: compute the MiniLM embedding, then feed it to a mock downstream task (e.g. a toy classifier/similarity score) — the embedding itself is not the response payload, it's what gets cached; the mock task's output is what the client receives
   - Write results + embeddings back to semantic cache
   - Mark task COMPLETED
 - **Done when:** submitting many concurrent requests visibly gets grouped into batches (log batch sizes), not processed one-by-one.
@@ -114,6 +116,11 @@ Do at most one fully; the rest can stay as "here's what I'd add next" talking po
 - Add TTL to cached entries, or a simple confidence-decay over time
 - Be ready to explain *why* this matters: semantic caches can return a stale-but-still-similar-looking answer for time-sensitive queries (e.g. "who is the CEO of X") even though the embedding hasn't changed
 - Talking point: shows awareness of a real, underdiscussed weakness of semantic caching
+
+### Stretch 4: Async Result Delivery
+- `/v1/predict` optionally returns a `task_id` immediately (e.g. via a query param or header toggle) instead of holding the connection open
+- New `GET /v1/result/{task_id}` endpoint lets the client poll until the task is COMPLETED
+- Talking point: shows both delivery models and the tradeoff — simplicity/lower latency of sync-wait vs. scalability of a decoupled polling model under long-tail inference latency
 
 ### Not building, but know the answer for:
 - Multi-tenant fairness (round-robin batching across client_ids instead of pure FIFO) — good answer to "how would you handle a noisy neighbor problem"
