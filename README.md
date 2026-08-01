@@ -17,8 +17,8 @@ The result is a system that avoids redundant computation when it can, and makes 
 - **FastAPI + asyncio**: the gateway itself is fully non-blocking — I/O (Redis calls, queueing) never blocks the event loop, so the API stays responsive under load.
 - **Redis**: used for three different jobs at once — rate-limit counters, the semantic cache (storing embeddings + results), and a lightweight task queue (via Redis Lists) connecting the API to background workers.
 - **PyTorch + sentence-transformers**: a small embedding model (`all-MiniLM-L6-v2`) generates vectors used both for semantic-cache comparisons and as input to a lightweight mock downstream task that produces the actual prediction; this runs off the main event loop so it doesn't block other requests while computing.
-- **Client identification**: every request carries an `X-Client-ID` header, used both as the rate-limit key and as the general tenant identifier.
-- **Synchronous response model**: `/v1/predict` holds the connection open and awaits the worker's result rather than returning a task ID to poll — simpler to reason about and demo for a portfolio-scale system.
+- **Client identification**: every request carries an `X-Client-ID` header, used both as the rate-limit key and as the general tenant identifier; requests without it are rejected with HTTP 400 (no anonymous/shared fallback bucket).
+- **Synchronous response model**: `/v1/predict` holds the connection open and awaits the worker's result via an in-process `asyncio.Future` keyed by `task_id` (not Redis pub/sub — unnecessary overhead for a single-node setup) rather than returning a task ID to poll — simpler to reason about and demo for a portfolio-scale system.
 
 ## Architecture
 

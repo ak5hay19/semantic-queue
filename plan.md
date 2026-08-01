@@ -62,10 +62,11 @@ This is the diagram to keep open while building — every phase below maps to on
 - [ ] Async `TokenBucketRateLimiter` using `redis.asyncio`
   - Key schema: `rate_limit:{client_id}`
   - `client_id` is read from an `X-Client-ID` request header (used as the rate-limit key and general tenant identifier)
+  - Request missing `X-Client-ID` is rejected with HTTP 400 — no anonymous/shared fallback bucket
   - N tokens per time window (e.g. 100 req/min)
   - Return HTTP 429 when empty
 - [ ] `/health` and `/v1/predict` endpoints
-  - `/v1/predict` is synchronous: the request holds the connection open and awaits the worker's result (e.g. via Redis pub/sub or an internal asyncio Future keyed by `task_id`), returning the actual output in the same response. No separate result-polling endpoint in the base project — see Stretch 4.
+  - `/v1/predict` is synchronous: the request holds the connection open and awaits the worker's result via an `asyncio.Future` (or `asyncio.Event` + shared dict) keyed by `task_id`, held in the API process and resolved by the worker once it writes the result — not Redis pub/sub, which is unnecessary subscribe/unsubscribe overhead for a single-node setup. Returns the actual output in the same response. No separate result-polling endpoint in the base project — see Stretch 4.
 - **Done when:** hammering `/v1/predict` past the limit reliably returns 429, and it resets after the window.
 
 ## Phase 3: Redis Semantic Vector Cache

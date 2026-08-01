@@ -35,6 +35,7 @@ Instructions for me (human): skim this file any time I want to know exactly how 
 - [ ] `/v1/predict` implemented as synchronous hold-open (no polling endpoint in base)
 - [ ] Verified: exceeding rate limit returns HTTP 429
 - [ ] Verified: limit resets after time window
+- [ ] Verified: missing X-Client-ID header returns 400
 
 **Status:** Not started
 
