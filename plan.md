@@ -1,0 +1,128 @@
+# SemanticQueue — Build Plan
+
+Async ML Task Queue & Semantic Inference Gateway.
+
+## Goal
+Finish the base project (Phases 1–6) first. Stretch goals are separate and only attempted after the base is fully working and demoable.
+
+## Timeline (5 days)
+- Day 1: Phase 1 + Phase 2
+- Day 2: Phase 3
+- Day 3: Phase 4
+- Day 4: Phase 5
+- Day 5: Phase 6 + buffer / polish / README
+
+---
+
+## Architecture Flow
+
+```mermaid
+flowchart TD
+    A[Client Request] --> B[FastAPI Gateway Router]
+    B --> C{Token Bucket<br/>Rate Limiter - Redis}
+    C -->|Exceeded| D[HTTP 429]
+    C -->|Allowed| E{Semantic Vector<br/>Cache - Redis}
+    E -->|Cache Hit<br/>cosine sim > 0.92| F[Return Cached Result<br/>~3ms]
+    E -->|Cache Miss| G[Enqueue Task<br/>Redis List LPUSH]
+    G --> H[Background Worker Pool<br/>asyncio, BRPOP]
+    H --> I{Dynamic Batch Accumulator<br/>16 requests OR 20ms}
+    I --> J[PyTorch Inference Engine<br/>MiniLM / Transformer]
+    J --> K[Compute Embeddings + Inference]
+    K --> L[Write Result to Semantic Cache]
+    K --> M[Return Output to Client]
+```
+
+This is the diagram to keep open while building — every phase below maps to one box in this flow.
+
+---
+
+## Tech Stack
+- **Language:** Python 3.12+
+- **API layer:** FastAPI, Uvicorn
+- **Store/Cache/Queue:** Redis 7.x (`redis.asyncio`)
+- **ML:** PyTorch, sentence-transformers (`all-MiniLM-L6-v2`), NumPy
+- **Infra:** Docker, Docker Compose
+- **Load testing:** Locust
+- **Testing:** pytest, httpx
+
+## Environment
+- WSL2 (Ubuntu) + Docker Desktop with WSL2 backend
+- All work done inside the WSL2 native filesystem, not `/mnt/c/...`
+
+---
+
+## Phase 1: Environment & Container Setup
+- [ ] Project structure: `/app`, `/config`, `/workers`, `/tests`
+- [ ] Dockerfile + docker-compose.yml with two services: `api` (FastAPI) and `redis` (Redis 7.x)
+- [ ] `requirements.txt` with pinned versions: fastapi, uvicorn, redis, torch, sentence-transformers, numpy, locust
+- **Done when:** `docker-compose up` boots both containers cleanly, `redis-cli ping` works from inside the api container.
+
+## Phase 2: Async API Gateway & Token Bucket Rate Limiter
+- [ ] FastAPI entry point in `app/main.py`
+- [ ] Async `TokenBucketRateLimiter` using `redis.asyncio`
+  - Key schema: `rate_limit:{client_id}`
+  - N tokens per time window (e.g. 100 req/min)
+  - Return HTTP 429 when empty
+- [ ] `/health` and `/v1/predict` endpoints
+- **Done when:** hammering `/v1/predict` past the limit reliably returns 429, and it resets after the window.
+
+## Phase 3: Redis Semantic Vector Cache
+- [ ] `app/cache.py`
+  - Exact-string match check first (cheap)
+  - If no exact match: embed with sentence-transformers (all-MiniLM-L6-v2)
+  - Cosine similarity check against cached vectors (NumPy)
+  - Threshold: 0.92 → CACHE_HIT, else CACHE_MISS
+- **Done when:** two differently-worded but semantically similar prompts hit the same cache entry; log clearly shows HIT vs MISS.
+
+## Phase 4: Async Task Queue & Dynamic Batching Worker
+- [ ] Producer: push `{task_id, payload}` to Redis List via `LPUSH ml_task_queue`
+- [ ] `workers/inference_worker.py`
+  - Pop tasks with `BRPOP`
+  - Dynamic batcher: batch_size=16 OR max_delay=20ms, whichever first
+  - Run batched forward pass in PyTorch
+  - Write results + embeddings back to semantic cache
+  - Mark task COMPLETED
+- **Done when:** submitting many concurrent requests visibly gets grouped into batches (log batch sizes), not processed one-by-one.
+
+## Phase 5: Testing & Telemetry
+- [ ] Structured JSON logs: `latency_ms`, `cache_status`, `batch_size`, `qps`
+- [ ] pytest + httpx tests: rate limiting behavior, cache hit/miss correctness, batching accuracy
+- **Done when:** test suite passes, logs are readable and would let you explain a request's full journey after the fact.
+
+## Phase 6: Load Benchmarking
+- [ ] `locustfile.py` simulating 500+ concurrent clients on `/v1/predict`
+- [ ] Run 3 scenarios: cold (0% cache), warm (high cache hit), overload (429 enforcement)
+- [ ] Record: peak QPS, p50/p95/p99 latency, % latency reduction cache-hit vs cache-miss
+- **Done when:** you have real numbers you can quote in an interview, not estimates.
+
+---
+
+## Stretch Goals (only after base project fully works)
+Do at most one fully; the rest can stay as "here's what I'd add next" talking points.
+
+### Stretch 1: Adaptive Similarity Threshold (lowest effort — do this one first if time allows)
+- Instead of hardcoded 0.92, track outcomes over a rolling window (e.g. last N cache hits) and log an estimated false-hit rate
+- Adjust threshold up/down based on that signal
+- Talking point: shows the cache tuning itself rather than being a fixed magic number
+
+### Stretch 2: Cost-Aware Dynamic Batching
+- Replace fixed `batch_size=16` / `max_delay=20ms` with logic that reacts to current queue depth
+- Queue backing up → batch bigger/faster; queue quiet → don't force unnecessary wait
+- Talking point: batching adapts to load instead of being static
+
+### Stretch 3: Cache Staleness / Drift Handling
+- Add TTL to cached entries, or a simple confidence-decay over time
+- Be ready to explain *why* this matters: semantic caches can return a stale-but-still-similar-looking answer for time-sensitive queries (e.g. "who is the CEO of X") even though the embedding hasn't changed
+- Talking point: shows awareness of a real, underdiscussed weakness of semantic caching
+
+### Not building, but know the answer for:
+- Multi-tenant fairness (round-robin batching across client_ids instead of pure FIFO) — good answer to "how would you handle a noisy neighbor problem"
+- Swapping Redis List for RabbitMQ/Kafka — know what you'd gain (ack/retry, dead-letter queue, durability) and why you didn't need it for a portfolio-scale project
+
+---
+
+## Interview Prep Reminders
+- Know your numbers cold: rate limit config, similarity threshold, batch_size, max_delay — and *why* those values
+- Be ready to explain the async/blocking distinction for the PyTorch forward pass (why it needs to run off the event loop)
+- Don't oversell "novelty" — frame it as informed engineering trade-offs, not invention
+- Have a one-line answer ready for "what would you do with more time" → point at the stretch goals list above
