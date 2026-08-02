@@ -35,17 +35,27 @@ Instructions for me (human): skim this file any time I want to know exactly how 
 ---
 
 ## Phase 2: Async API Gateway & Token Bucket Rate Limiter
-- [ ] `app/main.py` FastAPI entry point created
-- [ ] TokenBucketRateLimiter implemented using `redis.asyncio`
-- [ ] `client_id` read from `X-Client-ID` header
-- [ ] `/health` endpoint working
-- [ ] `/v1/predict` endpoint working
-- [ ] `/v1/predict` implemented as synchronous hold-open (no polling endpoint in base)
-- [ ] Verified: exceeding rate limit returns HTTP 429
-- [ ] Verified: limit resets after time window
-- [ ] Verified: missing X-Client-ID header returns 400
+- [x] `app/main.py` FastAPI entry point created
+- [x] TokenBucketRateLimiter implemented using `redis.asyncio`
+- [x] `client_id` read from `X-Client-ID` header
+- [x] `/health` endpoint working
+- [x] `/v1/predict` endpoint working
+- [x] `/v1/predict` implemented as synchronous hold-open (no polling endpoint in base)
+- [x] Verified: exceeding rate limit returns HTTP 429
+- [x] Verified: limit resets after time window
+- [x] Verified: missing X-Client-ID header returns 400
 
-**Status:** Not started
+**Notes (deviations from plan.md — full detail in `phases/phase-2.md`):**
+- Rate limiter refills continuously (a real token-bucket algorithm) rather than resetting to full at fixed window boundaries — `plan.md`'s "100 req/min" phrasing didn't fully disambiguate the two, and continuous refill avoids a boundary-burst problem a fixed-window counter would have.
+- Atomic check-and-decrement implemented via a Redis Lua script (`EVAL`), not `WATCH`/`MULTI` — simpler for a single-key read-modify-write.
+- Rate-limit keys auto-expire (`EXPIRE`, 2x the window) so idle client_id buckets don't accumulate in Redis forever — not specified in plan.md.
+- Added `config/settings.py` for env-driven settings (`REDIS_URL`, rate limit capacity/window) — the `config/` folder was reserved for this in Phase 1.
+- Added a 10s timeout on `/v1/predict`'s wait for a result, returning `504` if exceeded — bounds the failure mode where nothing ever resolves the Future.
+- `/v1/predict` is wired against a temporary stub (`_fake_worker` in `app/main.py`) that sleeps 0.5s and returns a canned result, since Phase 4's real queue/worker don't exist yet. Clearly marked in code for removal in Phase 4.
+- Open design question flagged (not resolved) for Phase 4: the real worker runs as a separate OS process and can't directly resolve an `asyncio.Future` living in the API process — Phase 4 will need something inside the API process that notices the worker's result (e.g. watching a Redis key/list) and resolves the Future itself.
+- Burst-tested with 110 concurrent requests against a 100-capacity bucket: 103 succeeded, 7 got 429 — the 3 extra are expected continuous-refill behavior during the concurrent dispatch window, not a bug (see `phases/phase-2.md` for the full explanation and command output).
+
+**Status:** Done, verified 2026-08-02 — see `phases/phase-2.md`
 
 ---
 
@@ -127,5 +137,5 @@ Instructions for me (human): skim this file any time I want to know exactly how 
 _(Update this line manually or ask Claude Code to update it after each session)_
 
 **Last updated:** 2026-08-02
-**Phases complete:** 1 / 6
-**Currently on:** Phase 2
+**Phases complete:** 2 / 6
+**Currently on:** Phase 3
