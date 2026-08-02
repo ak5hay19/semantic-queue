@@ -15,8 +15,12 @@ services:
       - "8001:8000"
     volumes:
       - .:/code
+      - hf_cache:/hf_cache
     environment:
       - REDIS_URL=redis://redis:6379/0
     depends_on:
       redis:
         condition: service_healthy
+
+volumes:
+  hf_cache:

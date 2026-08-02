@@ -17,6 +17,15 @@ COPY . .
 RUN groupadd --gid 1000 appuser \
     && useradd --uid 1000 --gid 1000 --no-create-home appuser \
     && chown -R appuser:appuser /code
+
+# appuser has no home directory, and sentence-transformers/huggingface_hub
+# default to caching downloaded models under ~/.cache. Point that at a
+# dedicated, writable directory instead (backed by a named volume in
+# docker-compose.yml) so the ~90MB model is downloaded once, not on every
+# --reload-triggered restart.
+ENV HF_HOME=/hf_cache
+RUN mkdir -p /hf_cache && chown -R appuser:appuser /hf_cache
+
 USER appuser
 
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]

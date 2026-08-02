@@ -85,7 +85,22 @@ This is the diagram to keep open while building — every phase below maps to on
   - Run batched forward pass in PyTorch: compute the MiniLM embedding, then feed it to a mock downstream task (e.g. a toy classifier/similarity score) — the embedding itself is not the response payload, it's what gets cached; the mock task's output is what the client receives
   - Write results + embeddings back to semantic cache
   - Mark task COMPLETED
-- **Done when:** submitting many concurrent requests visibly gets grouped into batches (log batch sizes), not processed one-by-one.
+- [ ] **Result delivery back to the API process (settled design):** the worker
+  runs as a separate OS process from the API and cannot directly resolve an
+  in-process `asyncio.Future` (see Phase 2's open question in
+  `phases/phase-2.md`). Resolved as follows:
+  - The worker writes each finished result to Redis via `LPUSH` onto a
+    dedicated results list (e.g. `predict_results`), tagged with `task_id`
+    — distinct from `ml_task_queue` (the work queue) and distinct from the
+    semantic cache (different Redis structure, different purpose:
+    request/response delivery, not similarity lookup).
+  - The API process runs one long-lived background `asyncio` task, started
+    at app startup, doing a continuous `BRPOP` loop against that results
+    list — not periodic polling. On each result popped, it looks up the
+    matching `task_id` in `pending_results` and resolves that `Future`.
+  - This is still not Redis pub/sub: one internal listener loop per API
+    process, not a per-request subscribe/unsubscribe.
+- **Done when:** submitting many concurrent requests visibly gets grouped into batches (log batch sizes), not processed one-by-one; and results produced by the worker correctly resolve the originating request's `/v1/predict` call via the `BRPOP` listener loop, not a direct cross-process Future call.
 
 ## Phase 5: Testing & Telemetry
 - [ ] Structured JSON logs: `latency_ms`, `cache_status`, `batch_size`, `qps`

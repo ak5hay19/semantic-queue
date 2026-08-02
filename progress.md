@@ -60,15 +60,24 @@ Instructions for me (human): skim this file any time I want to know exactly how 
 ---
 
 ## Phase 3: Redis Semantic Vector Cache
-- [ ] `app/cache.py` created
-- [ ] Exact-string match check implemented
-- [ ] Embedding generation via sentence-transformers implemented
-- [ ] Cosine similarity check implemented (NumPy)
-- [ ] Threshold logic (0.92) implemented
-- [ ] Verified: two differently-worded similar prompts return same cached result
-- [ ] Verified: logs clearly show CACHE_HIT vs CACHE_MISS
+- [x] `app/cache.py` created
+- [x] Exact-string match check implemented
+- [x] Embedding generation via sentence-transformers implemented
+- [x] Cosine similarity check implemented (NumPy)
+- [x] Threshold logic (0.92) implemented
+- [x] Verified: two differently-worded similar prompts return same cached result
+- [x] Verified: logs clearly show CACHE_HIT vs CACHE_MISS
 
-**Status:** Not started
+**Notes (deviations from plan.md — full detail in `phases/phase-3.md`):**
+- Cache keys derived from `sha256(text)` directly (`cache:entry:{id}`), so exact-match is a single O(1) lookup with no separate index.
+- Embeddings stored in their own bulk hash (`cache:embeddings`, one HGETALL fetches all of them for the vectorized similarity step) rather than bundled into each entry's hash — keeps the bulk fetch lean as the cache grows.
+- Embeddings stored as JSON-encoded float lists, not raw bytes — the shared Redis client uses `decode_responses=True` (from Phase 2), which would corrupt raw binary.
+- Added `cache_status` (`HIT`/`MISS`) to the `/v1/predict` response body, not just logs — makes verification possible from curl output alone. `task_id` is `null` on a hit (no Future/task machinery touched).
+- Logging is plain `key=value` text (standard `logging` module), not JSON — full JSON structured logging is explicitly Phase 5's deliverable.
+- Added `HF_HOME` + a named Docker volume (`hf_cache`) so the ~90MB embedding model persists across `--reload` restarts — `appuser` (added in the Phase 1 follow-up) has no home directory to cache into by default.
+- **Finding:** the originally suggested test pair ("what's the weather like today" vs "how's the weather today") scores 0.89 cosine similarity — below the 0.92 threshold, so it would not actually hit. Verified against the real model and used a different, empirically-confirmed paraphrase pair (0.9651) for the demo instead. Full numbers in `phases/phase-3.md`.
+
+**Status:** Done, verified 2026-08-02 — see `phases/phase-3.md`
 
 ---
 
@@ -137,5 +146,5 @@ Instructions for me (human): skim this file any time I want to know exactly how 
 _(Update this line manually or ask Claude Code to update it after each session)_
 
 **Last updated:** 2026-08-02
-**Phases complete:** 2 / 6
-**Currently on:** Phase 3
+**Phases complete:** 3 / 6
+**Currently on:** Phase 4

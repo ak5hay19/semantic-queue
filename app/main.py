@@ -1,17 +1,27 @@
 import asyncio
+import logging
 import uuid
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from pydantic import BaseModel
 from redis.asyncio import Redis
+from sentence_transformers import SentenceTransformer
 
+from app.cache import SemanticCache
 from app.rate_limiter import TokenBucketRateLimiter
 from config.settings import (
+    CACHE_SIMILARITY_THRESHOLD,
+    EMBEDDING_MODEL_NAME,
     RATE_LIMIT_CAPACITY,
     RATE_LIMIT_WINDOW_SECONDS,
     REDIS_URL,
 )
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
+# Quiet the HTTP request logs from the one-time model download at startup
+# so they don't drown out the CACHE_HIT/CACHE_MISS lines this phase cares about.
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 # task_id -> Future that gets resolved once a result is ready. In-process
 # only, not Redis-backed — see phases/phase-2.md for why (single API
@@ -29,6 +39,13 @@ async def lifespan(app: FastAPI):
         app.state.redis,
         capacity=RATE_LIMIT_CAPACITY,
         window_seconds=RATE_LIMIT_WINDOW_SECONDS,
+    )
+    # Loaded once at startup (not per-request) since this is a multi-second
+    # blocking call. Startup itself blocks the event loop here too, but
+    # that's fine — uvicorn doesn't accept connections until this finishes.
+    app.state.embedding_model = SentenceTransformer(EMBEDDING_MODEL_NAME)
+    app.state.cache = SemanticCache(
+        app.state.redis, app.state.embedding_model, threshold=CACHE_SIMILARITY_THRESHOLD
     )
     yield
     await app.state.redis.aclose()
@@ -59,8 +76,9 @@ class PredictRequest(BaseModel):
 
 
 class PredictResponse(BaseModel):
-    task_id: str
+    task_id: str | None = None
     result: dict
+    cache_status: str
 
 
 @app.get("/health")
@@ -74,7 +92,7 @@ async def health():
 # runs the model, and eventually the result reaches this Future. None of
 # that exists yet, so this fakes the round trip with a short sleep and a
 # canned response purely so /v1/predict's request/response path (rate
-# limit -> enqueue -> await result) is testable now.
+# limit -> cache -> enqueue -> await result) is testable now.
 async def _fake_worker(task_id: str, payload: PredictRequest) -> None:
     await asyncio.sleep(0.5)
     future = pending_results.get(task_id)
@@ -87,8 +105,16 @@ async def _fake_worker(task_id: str, payload: PredictRequest) -> None:
 
 @app.post("/v1/predict", response_model=PredictResponse)
 async def predict(
-    payload: PredictRequest, client_id: str = Depends(enforce_rate_limit)
+    payload: PredictRequest,
+    request: Request,
+    client_id: str = Depends(enforce_rate_limit),
 ):
+    cache: SemanticCache = request.app.state.cache
+    lookup = await cache.lookup(payload.text)
+
+    if lookup.hit:
+        return PredictResponse(result=lookup.result, cache_status="HIT")
+
     task_id = str(uuid.uuid4())
     future = asyncio.get_running_loop().create_future()
     pending_results[task_id] = future
@@ -102,4 +128,6 @@ async def predict(
     finally:
         pending_results.pop(task_id, None)
 
-    return PredictResponse(task_id=task_id, result=result)
+    await cache.store(lookup.entry_id, payload.text, result, lookup.embedding)
+
+    return PredictResponse(task_id=task_id, result=result, cache_status="MISS")
