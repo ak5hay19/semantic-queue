@@ -256,6 +256,59 @@ increasing `max_delay` at the cost of added per-request latency. Good
 "what would you improve with more time" material: it's a genuine
 throughput bottleneck upstream of the worker, not a batching design flaw.
 
+### Root-cause investigation: the ~13 req/sec ceiling, 2026-08-02
+
+Follow-up check, prompted by a specific hypothesis: is
+`SemanticCache._embed()`'s call to `model.encode()` (in `app/cache.py`,
+run inline on every `/v1/predict` request during the cache-lookup step)
+a synchronous CPU-bound call left un-offloaded inside an `async def`
+route — which would fully block FastAPI's event loop for its duration,
+serializing all concurrent requests through that one step?
+
+**Hypothesis ruled out — confirmed, not assumed.** `app/cache.py:52`:
+```python
+vector = await asyncio.to_thread(self.model.encode, text)
+```
+`_embed()` already wraps `model.encode()` in `asyncio.to_thread`, and
+has since Phase 3. Checked the same pattern in the worker
+(`workers/inference_worker.py:85` and `:88-90`) — both `model.encode()`
+and the classifier's forward pass are also already offloaded via
+`asyncio.to_thread`. No un-offloaded model call exists anywhere in the
+request path. Per the investigation's own instructions, no code changes
+were made here — this is a confirmed non-issue, not a fix.
+
+**But the same method has a different, unrelated blocking cost that
+*is* inline and un-threaded — measured, not the thing originally asked
+about, so left alone, but worth recording.** In `SemanticCache.lookup()`
+(`app/cache.py`, right after the `_embed()` call), the bulk-fetched
+cache is deserialized and scanned synchronously on the event loop —
+`json.loads()` per cached embedding, a NumPy matrix build, and the
+cosine-similarity computation — none of it wrapped in `asyncio.to_thread`.
+Measured directly against the live cache (grown to 266 entries from
+Phase 4's own test traffic):
+```
+cache size: 266 entries
+HGETALL (redis I/O):        72.82 ms
+json.loads + matrix build:  46.58 ms  <- inline on the event loop, not threaded
+numpy similarity compute:   11.72 ms  <- also inline
+TOTAL inline (non-threaded) CPU work per request: 58.30 ms
+```
+~58ms of genuinely event-loop-blocking CPU work per request, at this
+cache size — in the same order of magnitude as the ~13 req/sec ceiling
+(58ms of serialized blocking per request caps single-file throughput
+around 1000/58 ≈ 17 req/sec, and the cache was smaller for part of the
+160-request burst, so the real average sits close to the observed
+number). This is a stronger, more directly evidenced explanation for
+the ceiling than GIL contention inside the (correctly threaded) embed
+call would be, and unlike the embed call, this one costs more as the
+cache grows — it's `O(cache size)` work, unthreaded, on every single
+request, hit or miss.
+
+This wasn't in scope to fix here (it's cache bookkeeping code, not a
+"synchronous model call," which is what this investigation was
+authorized to touch) — flagged as a finding for a future decision, not
+acted on. No code was changed as a result of this investigation.
+
 ## How to re-verify this later
 
 ```bash
