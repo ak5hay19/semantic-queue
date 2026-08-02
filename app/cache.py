@@ -25,6 +25,27 @@ def _entry_id(text: str) -> str:
     return hashlib.sha256(text.strip().encode("utf-8")).hexdigest()
 
 
+def _best_similarity_match(
+    raw_embeddings: dict[str, str], query_vector: np.ndarray
+) -> tuple[str, float]:
+    """Decode every cached embedding, build the matrix, and run the
+    vectorized cosine-similarity comparison. Pure CPU-bound work with no
+    I/O — deliberately synchronous so it can be run via asyncio.to_thread,
+    the same pattern used for the embedding model call. Cost is O(cache
+    size); left inline on the event loop it blocked every request for
+    ~58ms at a 266-entry cache (measured directly, see phases/phase-4.md).
+    """
+    ids = list(raw_embeddings.keys())
+    matrix = np.array(
+        [json.loads(raw_embeddings[i]) for i in ids], dtype=np.float32
+    )
+    similarities = (matrix @ query_vector) / (
+        np.linalg.norm(matrix, axis=1) * np.linalg.norm(query_vector) + 1e-10
+    )
+    best_idx = int(np.argmax(similarities))
+    return ids[best_idx], float(similarities[best_idx])
+
+
 @dataclass
 class CacheLookupResult:
     hit: bool
@@ -72,20 +93,16 @@ class SemanticCache:
 
         raw_embeddings = await self.redis.hgetall(_EMBEDDINGS_KEY)
         if raw_embeddings:
-            ids = list(raw_embeddings.keys())
-            matrix = np.array(
-                [json.loads(raw_embeddings[i]) for i in ids], dtype=np.float32
+            # Decode + matrix build + the vectorized cosine-similarity
+            # call are all CPU-bound with no I/O — offloaded to a thread
+            # so this doesn't block the event loop while it runs, same
+            # reasoning as _embed(). Cost is O(cache size); this used to
+            # run inline and cost ~58ms/request at a 266-entry cache.
+            best_id, best_score = await asyncio.to_thread(
+                _best_similarity_match, raw_embeddings, query_vector
             )
-            # Single vectorized cosine-similarity call against every
-            # cached vector at once — not a per-candidate Python loop.
-            similarities = (matrix @ query_vector) / (
-                np.linalg.norm(matrix, axis=1) * np.linalg.norm(query_vector) + 1e-10
-            )
-            best_idx = int(np.argmax(similarities))
-            best_score = float(similarities[best_idx])
 
             if best_score > self.threshold:
-                best_id = ids[best_idx]
                 cached_entry = await self.redis.hgetall(
                     f"{_ENTRY_KEY_PREFIX}{best_id}"
                 )

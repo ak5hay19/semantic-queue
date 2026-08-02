@@ -304,10 +304,76 @@ call would be, and unlike the embed call, this one costs more as the
 cache grows — it's `O(cache size)` work, unthreaded, on every single
 request, hit or miss.
 
-This wasn't in scope to fix here (it's cache bookkeeping code, not a
-"synchronous model call," which is what this investigation was
+This wasn't in scope to fix in that pass (it's cache bookkeeping code,
+not a "synchronous model call," which is what that investigation was
 authorized to touch) — flagged as a finding for a future decision, not
-acted on. No code was changed as a result of this investigation.
+acted on there. **Fixed in a follow-up pass — see below.**
+
+### Fix applied, 2026-08-02: offload the decode+compare step — and an honest result
+
+Wrapped the CPU-bound portion of `SemanticCache.lookup()` in
+`asyncio.to_thread`, same pattern as `_embed()`. The decode (`json.loads`
+per cached embedding), matrix build, and cosine-similarity computation
+were pulled into a new module-level function, `_best_similarity_match()`
+in `app/cache.py`, so they can be handed to a thread as one unit — only
+the Redis `HGETALL` itself remains a plain `await` (it was already
+non-blocking I/O, never the problem).
+
+**Re-measured with the same methodology, calling the real (now-threaded)
+function directly:**
+```
+cache size: 266 entries
+HGETALL (redis I/O):                  104.11 ms
+_best_similarity_match (now threaded): 45.39 ms
+```
+Comparable cost to before (~46-58ms) — expected, since the fix moves
+*where* this work runs, not how much work it is.
+
+**Re-ran the same 160-request concurrent burst test (fresh distinct
+text, single `asyncio.gather` dispatch, per-request `client_id`s) to
+check the actual req/sec effect:**
+```
+dispatched 160 requests in 16.210s -> 9.9 req/sec
+status codes: Counter({200: 160})
+cache status: Counter({'MISS': 159, 'HIT': 1})
+```
+**Not an improvement — if anything, slightly worse than the ~13/sec
+baseline.** This is reported as measured, not adjusted to look better.
+
+**Why, diagnosed rather than guessed at:** offloading to a thread frees
+the *event loop* (the main thread can keep scheduling other coroutines'
+I/O while the thread runs), but it does not grant additional *CPU*
+throughput to Python-heavy work, because of the GIL — only one thread
+executes Python bytecode at a time, regardless of how many threads are
+"running." `json.loads()` in a Python loop is exactly this kind of
+GIL-bound work (unlike NumPy's matrix multiply and norm calls inside the
+same function, which do release the GIL). Confirmed directly: 10
+sequential `asyncio.to_thread(_best_similarity_match, ...)` calls
+against the same 425-entry cache took 912.8ms total; 10 *concurrent*
+calls (`asyncio.gather`) took 1630.5ms — a **0.56x "speedup"**, i.e.
+concurrent execution was ~1.8x *slower* than sequential, on a 16-core
+machine. That's thread-contention overhead with no parallel benefit,
+the signature of GIL-bound work fighting over the same interpreter lock.
+The cache also kept growing across both burst tests (this run started
+around 266 entries and ended near 425), adding a second, compounding
+cost on top of the GIL ceiling.
+
+**Net assessment:** the fix is still correct and worth keeping — the
+event loop genuinely no longer blocks on this step, which matters for
+overall fairness/responsiveness (e.g. other requests' Redis I/O, health
+checks, or the result listener aren't held up behind one request's
+58ms of synchronous compute). But it does not fix the throughput
+ceiling itself; that ceiling is fundamentally the Python GIL applied to
+CPU-bound pure-Python decode work, which threading cannot parallelize.
+A real throughput fix would need one of: moving this step to a
+`ProcessPoolExecutor` (separate processes, separate GILs) instead of a
+thread pool; storing embeddings as a single packed binary blob decoded
+via one vectorized `numpy.frombuffer` call instead of N per-item
+`json.loads` calls; or running multiple API worker processes (`uvicorn
+--workers N`). None of that was implemented here — this pass fixed the
+event-loop-blocking bug as asked and honestly reported that it doesn't
+move the req/sec number, rather than substituting a different, larger
+fix without being asked.
 
 ## How to re-verify this later
 
