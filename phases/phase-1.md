@@ -126,7 +126,9 @@ cleanly with no conflicts (full install log has 60+ resolved packages,
    untouched). `docker-compose.yml` maps `8001:8000`, so the container's
    internal port is still 8000, only the host-side mapping changed. Nothing
    in `plan.md` depends on the literal number 8000, so this doesn't affect
-   Phase 2+.
+   Phase 2+. Re-checked in a follow-up pass: `ports:` under `api` in
+   `docker-compose.yml` contains only `"8001:8000"` — no `8000:8000` ever
+   got reintroduced.
 
 3. **Live-reload dev setup added.** `docker-compose.yml` bind-mounts the
    project directory into `/code` and the Dockerfile's `CMD` runs uvicorn
@@ -138,6 +140,20 @@ cleanly with no conflicts (full install log has 60+ resolved packages,
    specified in `plan.md`, added so `api` can't start before `redis` is
    actually accepting connections — otherwise Phase 2's rate limiter would
    intermittently fail to connect on a cold `docker compose up`.
+
+5. **Non-root `USER` in the Dockerfile (added after initial Phase 1 pass).**
+   The first version of the container ran as root, which meant every
+   `--reload` recompile wrote `__pycache__/*.pyc` into the bind-mounted
+   project directory owned by `root` — those files couldn't be deleted or
+   modified from the host without `sudo`/container access, a real friction
+   point over 4 more days of iterating on `app/` and `workers/`. Fixed by
+   adding `appuser` with UID/GID `1000:1000` (the default first-user WSL2
+   UID, confirmed against the host via `id`) and switching to it with
+   `USER appuser` before `CMD`. Any files the container writes into the
+   bind mount now land owned by the host user. Verified by touching
+   `app/main.py` to force a `--reload` recompile and checking the
+   resulting `app/__pycache__/*.pyc` ownership — see verification steps
+   below.
 
 ## How to verify this still works later
 
@@ -167,6 +183,15 @@ r = redis.Redis(host='redis', port=6379, decode_responses=True)
 print('PING ->', r.ping())
 "
 # expect: PING -> True
+
+# Container should run as appuser (1000:1000), not root
+docker compose exec api id
+# expect: uid=1000(appuser) gid=1000(appuser) groups=1000(appuser)
+
+# No file in the project dir should be root-owned (run from the WSL host,
+# project root)
+find . -user root -not -path "./.git/*"
+# expect: no output
 
 # Tear down when done
 docker compose down

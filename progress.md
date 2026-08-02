@@ -28,6 +28,7 @@ Instructions for me (human): skim this file any time I want to know exactly how 
 - `docker-compose.yml` bind-mounts the project dir and runs uvicorn with `--reload` for live-reload during development.
 - Added a Redis healthcheck + `depends_on: condition: service_healthy` so `api` doesn't start before Redis is actually ready.
 - Verified Redis connectivity via the `redis` Python client (`r.ping()`) rather than the `redis-cli` binary, since `redis-tools` isn't installed in the slim base image — functionally equivalent, and closer to how the app itself will talk to Redis.
+- Follow-up pass: re-checked port mapping is still only `8001:8000`, confirmed. Also found `--reload` was writing `__pycache__` into the bind-mounted project dir as root — fixed by adding a non-root `appuser` (UID/GID 1000:1000, matching the host user) to the Dockerfile via `USER appuser`. Re-verified `docker compose up` still boots cleanly, Redis still reachable, and a forced reload now writes host-owned files.
 
 **Status:** Done, verified 2026-08-02 — see `phases/phase-1.md`
 
