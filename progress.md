@@ -15,14 +15,21 @@ Instructions for me (human): skim this file any time I want to know exactly how 
 ---
 
 ## Phase 1: Environment & Container Setup
-- [ ] Project structure created (`/app`, `/config`, `/workers`, `/tests`)
-- [ ] Dockerfile written
-- [ ] docker-compose.yml written (api + redis services)
-- [ ] requirements.txt written with pinned versions
-- [ ] `docker-compose up` boots both containers cleanly
-- [ ] Verified Redis reachable from api container (`redis-cli ping` or equivalent)
+- [x] Project structure created (`/app`, `/config`, `/workers`, `/tests`)
+- [x] Dockerfile written
+- [x] docker-compose.yml written (api + redis services)
+- [x] requirements.txt written with pinned versions
+- [x] `docker-compose up` boots both containers cleanly
+- [x] Verified Redis reachable from api container (`redis-cli ping` or equivalent)
 
-**Status:** Not started
+**Notes (deviations from plan.md — full detail in `phases/phase-1.md`):**
+- Added a minimal placeholder `app/main.py` (single `GET /`) purely so the `api` container has something to boot with — the real gateway is Phase 2 scope.
+- `api` is published on host port **8001**, not 8000 — port 8000 was already taken by an unrelated `k3d-storm-local` cluster on this machine.
+- `docker-compose.yml` bind-mounts the project dir and runs uvicorn with `--reload` for live-reload during development.
+- Added a Redis healthcheck + `depends_on: condition: service_healthy` so `api` doesn't start before Redis is actually ready.
+- Verified Redis connectivity via the `redis` Python client (`r.ping()`) rather than the `redis-cli` binary, since `redis-tools` isn't installed in the slim base image — functionally equivalent, and closer to how the app itself will talk to Redis.
+
+**Status:** Done, verified 2026-08-02 — see `phases/phase-1.md`
 
 ---
 
@@ -118,6 +125,6 @@ Instructions for me (human): skim this file any time I want to know exactly how 
 ## Overall Progress Snapshot
 _(Update this line manually or ask Claude Code to update it after each session)_
 
-**Last updated:** —
-**Phases complete:** 0 / 6
-**Currently on:** Phase 1
+**Last updated:** 2026-08-02
+**Phases complete:** 1 / 6
+**Currently on:** Phase 2

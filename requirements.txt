@@ -1,0 +1,13 @@
+# CPU-only PyTorch wheels (torch==2.12.1+cpu below) — this box has no GPU passthrough
+# into Docker, and the default PyPI torch wheel bundles CUDA and is several GB larger
+# for no benefit here. The version suffix (+cpu) only exists on this index, so pip
+# can't accidentally resolve the CUDA build from PyPI instead.
+--extra-index-url https://download.pytorch.org/whl/cpu
+
+fastapi==0.138.2
+uvicorn[standard]==0.49.0
+redis==8.0.1
+torch==2.12.1+cpu
+sentence-transformers==5.6.0
+numpy==2.4.6
+locust==2.44.4
