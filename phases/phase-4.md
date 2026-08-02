@@ -214,6 +214,48 @@ $ docker compose exec redis redis-cli HLEN cache:embeddings
 68
 ```
 
+## Known behavior: size cap vs. time cap under realistic load
+
+Follow-up verification, 2026-08-02, closing the gap left above (the
+16-item cap never firing in the original tests).
+
+**The size cap is correct.** Proven by bypassing the API and pushing 25
+tasks directly onto `ml_task_queue` in a single Redis pipeline (one
+network round trip, so all 25 land in the queue effectively
+simultaneously):
+```
+BATCH_PROCESSED size=16 duration_ms=102.3
+BATCH_PROCESSED size=9  duration_ms=53.6
+```
+16 + 9 = 25 — capped at exactly 16, remainder in the next batch. The
+batcher's size-cap logic itself was never broken.
+
+**Under realistic HTTP traffic, the time cap dominates instead — and
+that's a measured, understood property of this pipeline, not a bug.**
+Firing 160 truly concurrent, genuinely-distinct-content requests (each
+on its own `client_id`, so the Phase 2 rate limiter couldn't interfere)
+still topped out around batch size 7. The 160 requests took 12.4s to
+fully dispatch — an arrival rate at the queue of roughly **13
+requests/sec**. Filling a 16-slot window inside a 20ms max_delay would
+need a sustained arrival rate around **~800 requests/sec**, about 60x
+higher. The gap is per-request API latency *before* a task ever reaches
+`LPUSH`: the rate-limit check, the exact-match cache check, the
+embedding computation for the cosine-similarity check, and the
+brute-force similarity scan itself all happen first, all inside the
+single-process API. At this per-request cost, the 20ms clock reliably
+runs out before 16 requests can arrive, so the time-based trigger fires
+almost every time in practice, even though the size-based trigger is
+fully functional and provably correct in isolation.
+
+**Worth calling out as a real optimization target**, not just a caveat:
+if the goal were to actually see `batch_size=16` batches under organic
+load, the lever to pull is reducing per-request time-to-enqueue — e.g.
+skipping the cache's cosine-similarity scan when the cache is small, a
+faster/smaller embedding path for the cache-lookup step specifically, or
+increasing `max_delay` at the cost of added per-request latency. Good
+"what would you improve with more time" material: it's a genuine
+throughput bottleneck upstream of the worker, not a batching design flaw.
+
 ## How to re-verify this later
 
 ```bash
