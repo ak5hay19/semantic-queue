@@ -105,13 +105,22 @@ Instructions for me (human): skim this file any time I want to know exactly how 
 ---
 
 ## Phase 5: Testing & Telemetry
-- [ ] Structured JSON logging implemented (latency_ms, cache_status, batch_size, qps)
-- [ ] pytest + httpx tests written for rate limiting
-- [ ] pytest + httpx tests written for cache hit/miss correctness
-- [ ] pytest + httpx tests written for batching accuracy
-- [ ] Full test suite passes
+- [x] Structured JSON logging implemented (latency_ms, cache_status, batch_size, qps)
+- [x] pytest + httpx tests written for rate limiting
+- [x] pytest + httpx tests written for cache hit/miss correctness
+- [x] pytest + httpx tests written for batching accuracy
+- [x] Full test suite passes
 
-**Status:** Not started
+**Notes (deviations from plan.md — full detail in `phases/phase-5.md`):**
+- `pytest`/`httpx` promoted from transitive to explicit `requirements.txt` pins — a Phase 1 gap (tech-stack section named them, the explicit pin list didn't), closed now that `tests/` uses them directly.
+- Custom `logging.Formatter` (`config/logging_config.py`, shared by api + worker) for JSON logs instead of a third-party JSON-logging library — small enough not to warrant a new dependency.
+- `latency_ms`/`qps` computed centrally by a new FastAPI middleware in `app/main.py`, not per-route — one place to get consistent timing for every route, current and future.
+- `qps` is a simple in-process trailing-1-second counter (`QpsTracker`), not a real metrics system — satisfies "the logs show it," nothing more.
+- No dedicated pytest test asserts on the JSON log format itself — verified manually via `docker compose logs | grep`, shown in `phases/phase-5.md`.
+- Added `tests/test_concurrency.py` beyond the three requested categories (rate limiting, cache, batching) — a regression test specifically targeting the Phase 4 event-loop-blocking bug class (asserts `/health` isn't stuck behind a concurrent cache-miss lookup). Flagged as an addition, not folded silently into another category.
+- Batching tests inject directly into `ml_task_queue` on an isolated Redis DB (15, not 0) and call the real `_collect_batch()` — avoids racing the actual live `worker` container, which continuously drains DB 0 in the running stack.
+
+**Status:** Done, verified 2026-08-02 — see `phases/phase-5.md`
 
 ---
 
@@ -155,5 +164,5 @@ Instructions for me (human): skim this file any time I want to know exactly how 
 _(Update this line manually or ask Claude Code to update it after each session)_
 
 **Last updated:** 2026-08-02
-**Phases complete:** 4 / 6
-**Currently on:** Phase 5
+**Phases complete:** 5 / 6
+**Currently on:** Phase 6

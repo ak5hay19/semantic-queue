@@ -10,6 +10,7 @@ from redis.asyncio import Redis
 from sentence_transformers import SentenceTransformer
 
 from app.cache import SemanticCache
+from config.logging_config import configure_logging
 from config.settings import (
     BATCH_MAX_DELAY_MS,
     BATCH_SIZE,
@@ -20,10 +21,7 @@ from config.settings import (
     TASK_QUEUE_KEY,
 )
 
-logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s"
-)
-logging.getLogger("httpx").setLevel(logging.WARNING)
+configure_logging()
 logger = logging.getLogger("semantic_queue.worker")
 
 NUM_MOCK_CLASSES = 3
@@ -105,10 +103,13 @@ async def _process_batch(
 
     elapsed_ms = (time.monotonic() - start) * 1000
     logger.info(
-        "BATCH_PROCESSED size=%d duration_ms=%.1f task_ids=%s",
-        len(batch),
-        elapsed_ms,
-        [item["task_id"] for item in batch],
+        "batch processed",
+        extra={
+            "event": "batch_processed",
+            "batch_size": len(batch),
+            "duration_ms": round(elapsed_ms, 1),
+            "task_ids": [item["task_id"] for item in batch],
+        },
     )
 
 

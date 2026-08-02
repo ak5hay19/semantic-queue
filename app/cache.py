@@ -79,7 +79,13 @@ class SemanticCache:
         exact = await self.redis.hgetall(f"{_ENTRY_KEY_PREFIX}{entry_id}")
         if exact:
             logger.info(
-                "CACHE_HIT method=exact entry_id=%s", entry_id
+                "cache hit (exact)",
+                extra={
+                    "event": "cache_lookup",
+                    "cache_status": "HIT",
+                    "method": "exact",
+                    "entry_id": entry_id,
+                },
             )
             return CacheLookupResult(
                 hit=True,
@@ -107,12 +113,16 @@ class SemanticCache:
                     f"{_ENTRY_KEY_PREFIX}{best_id}"
                 )
                 logger.info(
-                    "CACHE_HIT method=cosine_similarity entry_id=%s "
-                    "matched_entry_id=%s score=%.4f threshold=%.2f",
-                    entry_id,
-                    best_id,
-                    best_score,
-                    self.threshold,
+                    "cache hit (cosine_similarity)",
+                    extra={
+                        "event": "cache_lookup",
+                        "cache_status": "HIT",
+                        "method": "cosine_similarity",
+                        "entry_id": entry_id,
+                        "matched_entry_id": best_id,
+                        "score": round(best_score, 4),
+                        "threshold": self.threshold,
+                    },
                 )
                 return CacheLookupResult(
                     hit=True,
@@ -124,13 +134,25 @@ class SemanticCache:
                 )
 
             logger.info(
-                "CACHE_MISS entry_id=%s best_score=%.4f threshold=%.2f",
-                entry_id,
-                best_score,
-                self.threshold,
+                "cache miss",
+                extra={
+                    "event": "cache_lookup",
+                    "cache_status": "MISS",
+                    "entry_id": entry_id,
+                    "best_score": round(best_score, 4),
+                    "threshold": self.threshold,
+                },
             )
         else:
-            logger.info("CACHE_MISS entry_id=%s reason=empty_cache", entry_id)
+            logger.info(
+                "cache miss (empty cache)",
+                extra={
+                    "event": "cache_lookup",
+                    "cache_status": "MISS",
+                    "entry_id": entry_id,
+                    "reason": "empty_cache",
+                },
+            )
 
         return CacheLookupResult(
             hit=False,

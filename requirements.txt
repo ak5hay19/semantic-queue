@@ -11,3 +11,10 @@ torch==2.12.1+cpu
 sentence-transformers==5.6.0
 numpy==2.4.6
 locust==2.44.4
+
+# Were already present transitively (pulled in by sentence-transformers/
+# huggingface_hub and fastapi respectively) but only became directly used
+# by project code in Phase 5 (tests/) — pinned explicitly now rather than
+# relying on incidental resolver output.
+pytest==9.1.1
+httpx==0.28.1

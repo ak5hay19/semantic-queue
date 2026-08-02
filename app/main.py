@@ -2,7 +2,9 @@ import asyncio
 import contextlib
 import json
 import logging
+import time
 import uuid
+from collections import deque
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
@@ -12,6 +14,7 @@ from sentence_transformers import SentenceTransformer
 
 from app.cache import SemanticCache
 from app.rate_limiter import TokenBucketRateLimiter
+from config.logging_config import configure_logging
 from config.settings import (
     CACHE_SIMILARITY_THRESHOLD,
     EMBEDDING_MODEL_NAME,
@@ -22,11 +25,28 @@ from config.settings import (
     TASK_QUEUE_KEY,
 )
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
-# Quiet the HTTP request logs from the one-time model download at startup
-# so they don't drown out the CACHE_HIT/CACHE_MISS lines this phase cares about.
-logging.getLogger("httpx").setLevel(logging.WARNING)
+configure_logging()
 logger = logging.getLogger("semantic_queue.api")
+
+
+class QpsTracker:
+    """Requests/sec over a trailing 1-second window, computed from
+    in-process request timestamps. Approximate and per-process (no
+    cross-replica aggregation) — good enough for the structured logs
+    this phase asks for, not a metrics system.
+    """
+
+    def __init__(self, window_seconds: float = 1.0):
+        self.window_seconds = window_seconds
+        self._timestamps: deque[float] = deque()
+
+    def record_and_get_qps(self) -> float:
+        now = time.monotonic()
+        self._timestamps.append(now)
+        cutoff = now - self.window_seconds
+        while self._timestamps and self._timestamps[0] < cutoff:
+            self._timestamps.popleft()
+        return len(self._timestamps) / self.window_seconds
 
 # task_id -> Future that gets resolved once a result is ready. In-process
 # only, not Redis-backed — see phases/phase-2.md for why (single API
@@ -96,6 +116,8 @@ async def lifespan(app: FastAPI):
         REDIS_URL, decode_responses=True, socket_timeout=None
     )
 
+    app.state.qps_tracker = QpsTracker()
+
     listener_task = asyncio.create_task(_result_listener(app.state.blocking_redis))
 
     yield
@@ -108,6 +130,37 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
+
+
+@app.middleware("http")
+async def request_logging_middleware(request: Request, call_next):
+    """One structured log line per completed request — the "full journey"
+    Phase 5 asks logs to support. latency_ms and qps are computed here so
+    every route gets them uniformly instead of duplicating timing code in
+    each handler; cache_status is filled in by predict() via
+    request.state when it's known (None for routes that don't touch the
+    cache, e.g. /health).
+    """
+    start = time.perf_counter()
+    request.state.cache_status = None
+    response = await call_next(request)
+    latency_ms = (time.perf_counter() - start) * 1000
+    qps = request.app.state.qps_tracker.record_and_get_qps()
+
+    logger.info(
+        "request completed",
+        extra={
+            "event": "request_completed",
+            "method": request.method,
+            "path": request.url.path,
+            "status_code": response.status_code,
+            "latency_ms": round(latency_ms, 2),
+            "qps": round(qps, 2),
+            "cache_status": getattr(request.state, "cache_status", None),
+            "client_id": request.headers.get("x-client-id"),
+        },
+    )
+    return response
 
 
 def get_client_id(x_client_id: str | None = Header(default=None)) -> str:
@@ -152,6 +205,7 @@ async def predict(
     lookup = await cache.lookup(payload.text)
 
     if lookup.hit:
+        request.state.cache_status = "HIT"
         return PredictResponse(result=lookup.result, cache_status="HIT")
 
     task_id = str(uuid.uuid4())
@@ -176,4 +230,5 @@ async def predict(
     finally:
         pending_results.pop(task_id, None)
 
+    request.state.cache_status = "MISS"
     return PredictResponse(task_id=task_id, result=result, cache_status="MISS")
