@@ -1,4 +1,6 @@
 import asyncio
+import contextlib
+import json
 import logging
 import uuid
 from contextlib import asynccontextmanager
@@ -16,20 +18,53 @@ from config.settings import (
     RATE_LIMIT_CAPACITY,
     RATE_LIMIT_WINDOW_SECONDS,
     REDIS_URL,
+    RESULT_QUEUE_KEY,
+    TASK_QUEUE_KEY,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 # Quiet the HTTP request logs from the one-time model download at startup
 # so they don't drown out the CACHE_HIT/CACHE_MISS lines this phase cares about.
 logging.getLogger("httpx").setLevel(logging.WARNING)
+logger = logging.getLogger("semantic_queue.api")
 
 # task_id -> Future that gets resolved once a result is ready. In-process
 # only, not Redis-backed — see phases/phase-2.md for why (single API
-# replica, no pub/sub overhead). Phase 4's real worker runs out-of-process,
-# so something inside the API process will still need to notice the
-# worker's result and resolve the matching Future; that mechanism isn't
-# built yet — Phase 2 only needs the Future/await machinery to exist.
+# replica, no pub/sub overhead). The real worker (Phase 4) runs as a
+# separate OS process and can't touch this dict or these Futures directly
+# — see _result_listener below for how a cross-process result actually
+# gets here.
 pending_results: dict[str, asyncio.Future] = {}
+
+
+async def _result_listener(blocking_redis: Redis) -> None:
+    """Long-lived background task, started at app startup: continuously
+    BRPOPs the results list the worker LPUSHes onto, and resolves the
+    matching in-process Future. This — not Redis pub/sub, not polling —
+    is the settled Phase 4 design for getting a result computed in a
+    separate worker process back to the specific /v1/predict call that's
+    awaiting it in this process.
+
+    Takes a dedicated Redis connection (not the shared `app.state.redis`
+    pool) with no client-side socket timeout — see the note in `lifespan`
+    for why an indefinitely-blocking BRPOP needs one.
+    """
+    while True:
+        try:
+            item = await blocking_redis.brpop(RESULT_QUEUE_KEY, timeout=0)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("result listener BRPOP failed, retrying in 1s")
+            await asyncio.sleep(1)
+            continue
+
+        _, raw = item
+        payload = json.loads(raw)
+        task_id = payload["task_id"]
+        future = pending_results.get(task_id)
+        if future and not future.done():
+            future.set_result(payload["result"])
 
 
 @asynccontextmanager
@@ -47,7 +82,28 @@ async def lifespan(app: FastAPI):
     app.state.cache = SemanticCache(
         app.state.redis, app.state.embedding_model, threshold=CACHE_SIMILARITY_THRESHOLD
     )
+
+    # A separate connection from app.state.redis, on purpose: BRPOP with
+    # timeout=0 blocks indefinitely at the Redis protocol level, but
+    # redis-py 8.x's client applies its own socket_timeout (default 5s)
+    # to every read regardless of the command's own timeout — so an
+    # indefinite BRPOP on the shared client gets killed client-side after
+    # 5s of no results. socket_timeout=None disables that for this
+    # connection. This also happens to be standard Redis practice anyway:
+    # a blocking command occupies a connection until it returns, so it
+    # shouldn't share a pool with the quick rate-limit/cache calls.
+    app.state.blocking_redis = Redis.from_url(
+        REDIS_URL, decode_responses=True, socket_timeout=None
+    )
+
+    listener_task = asyncio.create_task(_result_listener(app.state.blocking_redis))
+
     yield
+
+    listener_task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await listener_task
+    await app.state.blocking_redis.aclose()
     await app.state.redis.aclose()
 
 
@@ -86,23 +142,6 @@ async def health():
     return {"status": "ok"}
 
 
-# --- Phase 4 stub, delete when the real worker exists --------------------
-# The real path: enqueue {task_id, payload} to the Redis List
-# (workers/inference_worker.py), a worker pops it via BRPOP, batches it,
-# runs the model, and eventually the result reaches this Future. None of
-# that exists yet, so this fakes the round trip with a short sleep and a
-# canned response purely so /v1/predict's request/response path (rate
-# limit -> cache -> enqueue -> await result) is testable now.
-async def _fake_worker(task_id: str, payload: PredictRequest) -> None:
-    await asyncio.sleep(0.5)
-    future = pending_results.get(task_id)
-    if future and not future.done():
-        future.set_result({"stub": True, "echo": payload.text})
-
-
-# ---------------------------------------------------------------------------
-
-
 @app.post("/v1/predict", response_model=PredictResponse)
 async def predict(
     payload: PredictRequest,
@@ -119,7 +158,16 @@ async def predict(
     future = asyncio.get_running_loop().create_future()
     pending_results[task_id] = future
 
-    asyncio.create_task(_fake_worker(task_id, payload))
+    # Real path: hand off to workers/inference_worker.py via the Redis
+    # task queue. entry_id travels with the task so the worker can write
+    # the cache entry under the same key a future lookup() will derive
+    # for this text, without re-deriving it itself.
+    await request.app.state.redis.lpush(
+        TASK_QUEUE_KEY,
+        json.dumps(
+            {"task_id": task_id, "entry_id": lookup.entry_id, "text": payload.text}
+        ),
+    )
 
     try:
         result = await asyncio.wait_for(future, timeout=10.0)
@@ -127,7 +175,5 @@ async def predict(
         raise HTTPException(status_code=504, detail="Timed out waiting for result")
     finally:
         pending_results.pop(task_id, None)
-
-    await cache.store(lookup.entry_id, payload.text, result, lookup.embedding)
 
     return PredictResponse(task_id=task_id, result=result, cache_status="MISS")

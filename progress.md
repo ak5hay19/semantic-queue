@@ -82,16 +82,24 @@ Instructions for me (human): skim this file any time I want to know exactly how 
 ---
 
 ## Phase 4: Async Task Queue & Dynamic Batching Worker
-- [ ] Producer pushes to Redis List (`LPUSH ml_task_queue`) implemented
-- [ ] `workers/inference_worker.py` created
-- [ ] Worker pops tasks via `BRPOP`
-- [ ] Dynamic batcher implemented (batch_size=16 OR max_delay=20ms)
-- [ ] Batched PyTorch forward pass implemented
-- [ ] Results + embeddings written back to semantic cache
-- [ ] Task state updated to COMPLETED
-- [ ] Verified: concurrent requests visibly get grouped into batches in logs
+- [x] Producer pushes to Redis List (`LPUSH ml_task_queue`) implemented
+- [x] `workers/inference_worker.py` created
+- [x] Worker pops tasks via `BRPOP`
+- [x] Dynamic batcher implemented (batch_size=16 OR max_delay=20ms)
+- [x] Batched PyTorch forward pass implemented
+- [x] Results + embeddings written back to semantic cache
+- [x] Task state updated to COMPLETED
+- [x] Verified: concurrent requests visibly get grouped into batches in logs
 
-**Status:** Not started
+**Notes (deviations from plan.md — full detail in `phases/phase-4.md`):**
+- Worker recomputes the embedding the API already computed for the cache-similarity check (deliberate duplicate compute) — otherwise the "batched forward pass" would only batch the near-free classifier step, and the genuinely expensive step (MiniLM encoding) would never get the batching benefit at all.
+- "Mark task COMPLETED" has no separate status field — the worker's `LPUSH` onto `predict_results` (consumed via a destructive `BRPOP`) is itself the completion signal, per the settled Phase 3 design already recorded in `plan.md`.
+- One batching loop per worker process, not an explicit multi-worker pool — matches the Phase 4 spec's own text (a single `inference_worker.py`); `docker compose up --scale worker=N` would give a real pool for free since they'd share `ml_task_queue`, not needed at this scale.
+- No hot-reload for the worker (unlike the api service's `--reload`) — edits require `docker compose restart worker`.
+- **Real bug found and fixed:** redis-py 8.0.1's client-side `socket_timeout` (default 5s) was killing indefinitely-blocking `BRPOP` calls (both the worker's task wait and the API's result listener) after 5s of no traffic, even though `timeout=0` asks Redis to block forever. Fixed with a dedicated Redis connection (`socket_timeout=None`) for those two specific calls, separate from the general pooled client — also just correct Redis practice regardless of the library quirk.
+- **Test-methodology finding:** first batching demo attempt used near-duplicate templated sentences ("...sentence number 0/1/2...") — 49 of 50 turned out to be legitimate cosine-similarity cache hits (correctly deduplicated by Phase 3's cache) rather than worker traffic. Fixed the test (genuinely distinct topics), not the code. Real batches observed: 2, 5, 13, 4 (24 total) and a 40-request run summing correctly across 21 batches — largest single batch was 13, not the full 16 cap; explained in `phases/phase-4.md`.
+
+**Status:** Done, verified 2026-08-02 — see `phases/phase-4.md`
 
 ---
 
@@ -146,5 +154,5 @@ Instructions for me (human): skim this file any time I want to know exactly how 
 _(Update this line manually or ask Claude Code to update it after each session)_
 
 **Last updated:** 2026-08-02
-**Phases complete:** 3 / 6
-**Currently on:** Phase 4
+**Phases complete:** 4 / 6
+**Currently on:** Phase 5
