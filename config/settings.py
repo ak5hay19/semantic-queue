@@ -16,7 +16,19 @@ RATE_LIMIT_CAPACITY = int(os.environ.get("RATE_LIMIT_CAPACITY", "100"))
 RATE_LIMIT_WINDOW_SECONDS = float(os.environ.get("RATE_LIMIT_WINDOW_SECONDS", "60"))
 
 EMBEDDING_MODEL_NAME = os.environ.get("EMBEDDING_MODEL_NAME", "all-MiniLM-L6-v2")
+# all-MiniLM-L6-v2's fixed output width — the RediSearch HNSW index (Phase
+# 7, app/cache.py) needs this declared up front, not inferred at runtime.
+EMBEDDING_DIM = int(os.environ.get("EMBEDDING_DIM", "384"))
 CACHE_SIMILARITY_THRESHOLD = float(os.environ.get("CACHE_SIMILARITY_THRESHOLD", "0.92"))
+# RediSearch's HNSW search-time exploration factor. Its own default (10)
+# is tuned for speed over recall and was measured (not assumed) to
+# outright miss a genuine 0.975-similarity near-duplicate once the cache
+# held ~1700 entries — a real correctness problem for a cache, where a
+# missed hit means silently falling back to a full re-inference instead
+# of an error. Raising this was measured to cost <1ms extra per query at
+# that same scale (well within noise), so there's no real throughput
+# trade-off at this project's scale — see phases/phase-7.md.
+CACHE_EF_RUNTIME = int(os.environ.get("CACHE_EF_RUNTIME", "300"))
 
 # Redis List the API LPUSHes {task_id, entry_id, text} onto on a cache miss,
 # and the worker BRPOPs from to accumulate a batch.

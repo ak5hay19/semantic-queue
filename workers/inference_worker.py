@@ -121,6 +121,14 @@ async def main() -> None:
     # BRPOP(timeout=0) call after 5s of no tasks, even though Redis
     # itself was asked to block forever.
     blocking_redis = Redis.from_url(REDIS_URL, decode_responses=True, socket_timeout=None)
+    # A third, separate connection for the cache (Phase 7): decode_responses=
+    # False, since each entry's "embedding" hash field is a raw packed
+    # float32 buffer, not UTF-8 text — see app/cache.py's docstring. The
+    # worker only ever calls cache.store() (a write), which doesn't
+    # strictly need this, but ensure_index() and any future cache.lookup()
+    # call from this process would, so both processes construct the cache
+    # client the same way rather than relying on writes being lenient.
+    cache_redis = Redis.from_url(REDIS_URL, decode_responses=False)
 
     logger.info("loading embedding model %s", EMBEDDING_MODEL_NAME)
     model = SentenceTransformer(EMBEDDING_MODEL_NAME)
@@ -128,7 +136,8 @@ async def main() -> None:
     torch.manual_seed(42)
     classifier = MockClassifierHead()
 
-    cache = SemanticCache(redis, model, threshold=CACHE_SIMILARITY_THRESHOLD)
+    cache = SemanticCache(cache_redis, model, threshold=CACHE_SIMILARITY_THRESHOLD)
+    await cache.ensure_index()
 
     logger.info(
         "worker ready: batch_size=%d max_delay_ms=%s queue=%s",

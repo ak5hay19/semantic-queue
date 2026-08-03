@@ -167,6 +167,17 @@ Instructions for me (human): skim this file any time I want to know exactly how 
 ### Stretch 4: Async Result Delivery
 - [ ] Not started
 
+### Stretch 5: RediSearch (Redis Stack) Vector Search
+- [x] `docker-compose.yml`'s `redis` service swapped for `redis/redis-stack-server`
+- [x] HNSW index (cosine distance, dim 384) created over cached embeddings, replacing the brute-force NumPy scan in `app/cache.py`
+- [x] Exact-string match check kept as the first, cheap check (unchanged from Phase 3)
+- [x] 0.92 threshold behavior verified equivalent (RediSearch's cosine distance confirmed empirically to equal `1 - cosine_similarity`, not assumed)
+- [x] Phase 3/5 test cases (exact hit, cosine hit, dissimilar miss) re-verified passing
+- [x] Full pytest suite (9 tests) re-verified passing
+- [x] Phase 6 Cold-scenario load test re-run at the same 500-concurrent configuration, numbers compared side by side with the old brute-force run
+
+**Status:** Done, verified 2026-08-03 — see `phases/phase-7.md`. **Key result:** Cold-scenario 500-concurrent load test went from 3.87 req/s completed / 67.7% requests timing out (brute-force) to 22.81 req/s completed / 0% failures (RediSearch KNN) — a ~6x throughput increase and elimination of the SLA-timeout failure mode Phase 6 documented. **Also found and fixed:** RediSearch's default `EF_RUNTIME` (search-time recall knob, default 10) missed an obvious 0.975-similarity near-duplicate once the cache reached realistic scale (~1700 entries) — caught by re-running Phase 5's own test suite at that scale, not by the isolated small-scale threshold check. Fixed via a new `CACHE_EF_RUNTIME=300` setting, confirmed to cost no measurable latency at this scale.
+
 ---
 
 ## Overall Progress Snapshot

@@ -118,9 +118,22 @@ async def lifespan(app: FastAPI):
     # blocking call. Startup itself blocks the event loop here too, but
     # that's fine — uvicorn doesn't accept connections until this finishes.
     app.state.embedding_model = SentenceTransformer(EMBEDDING_MODEL_NAME)
-    app.state.cache = SemanticCache(
-        app.state.redis, app.state.embedding_model, threshold=CACHE_SIMILARITY_THRESHOLD
+    # Dedicated, decode_responses=False connection for the cache — not
+    # app.state.redis. Each cache entry's "embedding" hash field (Phase 7)
+    # is a raw packed float32 buffer, not UTF-8 text; a decode_responses=
+    # True client tries to decode every reply as a string, which corrupts
+    # binary vector data. See app/cache.py's docstring.
+    app.state.cache_redis = Redis.from_url(
+        REDIS_URL,
+        decode_responses=False,
+        max_connections=REDIS_MAX_CONNECTIONS,
+        socket_timeout=None,
+        socket_connect_timeout=None,
     )
+    app.state.cache = SemanticCache(
+        app.state.cache_redis, app.state.embedding_model, threshold=CACHE_SIMILARITY_THRESHOLD
+    )
+    await app.state.cache.ensure_index()
 
     # A separate connection from app.state.redis, on purpose: BRPOP with
     # timeout=0 blocks indefinitely at the Redis protocol level, but
@@ -145,6 +158,7 @@ async def lifespan(app: FastAPI):
     with contextlib.suppress(asyncio.CancelledError):
         await listener_task
     await app.state.blocking_redis.aclose()
+    await app.state.cache_redis.aclose()
     await app.state.redis.aclose()
 
 

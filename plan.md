@@ -138,6 +138,22 @@ Do at most one fully; the rest can stay as "here's what I'd add next" talking po
 - New `GET /v1/result/{task_id}` endpoint lets the client poll until the task is COMPLETED
 - Talking point: shows both delivery models and the tradeoff — simplicity/lower latency of sync-wait vs. scalability of a decoupled polling model under long-tail inference latency
 
+### Stretch 5: RediSearch (Redis Stack) Vector Search — DONE, see `phases/phase-7.md`
+- Replace Phase 3's brute-force NumPy cosine scan (`HGETALL` every cached embedding into
+  the API process, `json.loads` + matrix build + cosine compute in a Python loop) with
+  RediSearch's HNSW vector index and a real `FT.SEARCH ... KNN` query
+- This was always the natural upgrade path flagged back in Phase 3 (`plan.md`'s
+  "Vector similarity search implementation" decision explicitly chose brute-force over
+  RediSearch for the base project, on the grounds that a base-project-scale cache didn't
+  need it yet)
+- Phase 6's load test turned "the natural upgrade path" into "the fix for a documented,
+  measured 67.7% timeout rate at 500 concurrent clients" — see `phases/phase-7.md` for
+  the before/after numbers
+- Talking point: shows the difference between "brute-force is fine at small scale" and
+  knowing exactly which real infrastructure (RediSearch, not a bigger EC2 instance) fixes
+  it once it isn't — and having the actual measured numbers to back up *why* it was
+  swapped, not just that it theoretically scales better
+
 ### Not building, but know the answer for:
 - Multi-tenant fairness (round-robin batching across client_ids instead of pure FIFO) — good answer to "how would you handle a noisy neighbor problem"
 - Swapping Redis List for RabbitMQ/Kafka — know what you'd gain (ack/retry, dead-letter queue, durability) and why you didn't need it for a portfolio-scale project
