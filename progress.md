@@ -125,21 +125,30 @@ Instructions for me (human): skim this file any time I want to know exactly how 
 ---
 
 ## Phase 6: Load Benchmarking
-- [ ] locustfile.py written, simulates 500+ concurrent clients
-- [ ] Cold run completed (0% cache hits) — numbers recorded
-- [ ] Warm run completed (high cache hits) — numbers recorded
-- [ ] Overload run completed (429 enforcement verified) — numbers recorded
-- [ ] Peak QPS recorded
-- [ ] p50/p95/p99 latency recorded
-- [ ] % latency reduction (cache hit vs miss) calculated
+- [x] locustfile.py written, simulates 500+ concurrent clients
+- [x] Cold run completed (0% cache hits) — numbers recorded
+- [x] Warm run completed (high cache hits) — numbers recorded
+- [x] Overload run completed (429 enforcement verified) — numbers recorded
+- [x] Peak QPS recorded
+- [x] p50/p95/p99 latency recorded
+- [x] % latency reduction (cache hit vs miss) calculated
 
-**Status:** Not started
+**Notes (deviations from plan.md — full detail in `phases/phase-6.md`):**
+- Locust runs from a host-side virtualenv (`.venv/`), not inside the `api` container — keeps the load generator's own CPU use from competing with the system under test.
+- Three separate Locust `User` classes (`ColdUser`/`WarmUser`/`OverloadUser`), selected on the CLI, one per scenario, rather than one parameterized file.
+- **Real bugs found and fixed, both connection-handling artifacts, not the actual measured bottleneck:** (1) redis-py's async client pool defaults to 100 connections — exhausted immediately at 500 concurrent requests (`MaxConnectionsError` on 40%+ of requests); fixed via a new `REDIS_MAX_CONNECTIONS=512` setting. (2) The same "redis-py silently applies a 5s client-side timeout" quirk Phase 4 found for the two dedicated `BRPOP` connections turned out to also apply to the general-purpose pooled client under 500-concurrent congestion (confirmed by inspecting a live `Connection` object's actual attributes) — fixed with explicit `socket_timeout=None, socket_connect_timeout=None` on `app.state.redis`.
+- **Cold scenario's request generator went through two failed, empirically-measured attempts before landing on random word-salad text** — natural-language slot-fill templates (even with 50625 combinatorial, no-replacement variations) still produced a 20% (then 9%, after adding template-shape variation) false cache-hit rate at scale, because MiniLM's embeddings picked up on shared sentence structure across "distinct" generated content. Random unordered word draws from an 80-word vocabulary measured 0/599 false hits and is what's actually used.
+- **Overload scenario's first draft used expensive (cache-miss) request bodies** and only generated 178 total requests across 500 users in 30s — nowhere near enough per-client_id volume to exhaust a 100-token bucket. Fixed by having Overload reuse one fixed, pre-cached sentence so it measures the rate limiter specifically, not the cache-miss path a second time.
+- **A related, not-fixed finding:** under 500-concurrent Cold load, 67.7% of requests legitimately exceeded the app's own existing 10s SLA timeout (504, not a crash) — the same GIL-bound cache-scan ceiling Phase 4 documented, now large enough at this concurrency to cause outright timeouts rather than just slow throughput. Left alone per this phase's explicit instructions.
+- **Key numbers:** Cold (500 users, cache-miss only): 3.87 req/s completed, p50/p95/p99 = 13.0s/25.0s/35.0s, 67.7% hit the 10s SLA timeout. Warm (500 users, 100% cache hit): 70.23 req/s, p50/p95/p99 = 4.0s/15.0s/42.0s, 0 failures. Overload (500 users, 5 shared client_ids): 604 req/s aggregate, 95.3% correctly rejected with HTTP 429. Latency reduction, cache hit vs miss: ~69% at p50 under full load, ~96% at best-case/uncongested single requests.
+
+**Status:** Done, verified 2026-08-03 — see `phases/phase-6.md`
 
 ---
 
 ## BASE PROJECT COMPLETE
-- [ ] All phases above checked off
-- [ ] README written explaining architecture, how to run it, and key numbers
+- [x] All phases above checked off
+- [x] README written explaining architecture, how to run it, and key numbers
 - [ ] Can explain every design decision out loud without notes
 
 ---
@@ -163,6 +172,6 @@ Instructions for me (human): skim this file any time I want to know exactly how 
 ## Overall Progress Snapshot
 _(Update this line manually or ask Claude Code to update it after each session)_
 
-**Last updated:** 2026-08-02
-**Phases complete:** 5 / 6
-**Currently on:** Phase 6
+**Last updated:** 2026-08-03
+**Phases complete:** 6 / 6
+**Currently on:** Base project complete — stretch goals available, none started

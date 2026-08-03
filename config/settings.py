@@ -1,6 +1,15 @@
 import os
 
 REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
+# redis-py's async client defaults this pool to 100 connections. Fine for
+# normal traffic, but Phase 6 load testing (500+ concurrent clients, each
+# needing a connection for the rate-limit check and cache lookup) hit
+# `MaxConnectionsError` at that default — see phases/phase-6.md. Bumped to
+# comfortably cover the load-test target; this is a connection-count
+# ceiling, not the actual measured throughput bottleneck (that one's
+# GIL-bound compute, documented in phases/phase-4.md, and deliberately
+# left alone).
+REDIS_MAX_CONNECTIONS = int(os.environ.get("REDIS_MAX_CONNECTIONS", "512"))
 
 # plan.md's example: 100 requests per 60s window per client_id.
 RATE_LIMIT_CAPACITY = int(os.environ.get("RATE_LIMIT_CAPACITY", "100"))

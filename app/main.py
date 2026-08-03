@@ -20,6 +20,7 @@ from config.settings import (
     EMBEDDING_MODEL_NAME,
     RATE_LIMIT_CAPACITY,
     RATE_LIMIT_WINDOW_SECONDS,
+    REDIS_MAX_CONNECTIONS,
     REDIS_URL,
     RESULT_QUEUE_KEY,
     TASK_QUEUE_KEY,
@@ -89,7 +90,25 @@ async def _result_listener(blocking_redis: Redis) -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    app.state.redis = Redis.from_url(REDIS_URL, decode_responses=True)
+    # socket_timeout and socket_connect_timeout explicitly set to None,
+    # not omitted: this redis-py version silently substitutes a 5s
+    # client-side timeout for either one on any connection that doesn't
+    # pass them explicitly (the same quirk Phase 4 found and fixed for the
+    # two long-lived BRPOP connections below). Phase 6 load testing
+    # surfaced both here too, on the general pool: 500 concurrent clients
+    # competing for it can genuinely push an ordinary rate-limit/cache
+    # call's read past 5s, and spinning up ~500 new pooled connections at
+    # once during ramp-up can genuinely push a connection *attempt* past
+    # 5s — neither is the call actually hanging forever, so a fixed 5s
+    # client-side cutoff was manufacturing failures out of what would
+    # otherwise be real (if slow) completions. See phases/phase-6.md.
+    app.state.redis = Redis.from_url(
+        REDIS_URL,
+        decode_responses=True,
+        max_connections=REDIS_MAX_CONNECTIONS,
+        socket_timeout=None,
+        socket_connect_timeout=None,
+    )
     app.state.rate_limiter = TokenBucketRateLimiter(
         app.state.redis,
         capacity=RATE_LIMIT_CAPACITY,
