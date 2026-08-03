@@ -162,7 +162,15 @@ Instructions for me (human): skim this file any time I want to know exactly how 
 - [ ] Not started
 
 ### Stretch 3: Cache Staleness / Drift Handling
-- [ ] Not started
+- [x] Confidence decay implemented (primary mechanism): `effective_similarity = raw_similarity - (CACHE_DECAY_RATE_PER_DAY * age_in_days)`, applied to both the exact-match and cosine-similarity lookup paths
+- [x] Hard TTL implemented (backstop): real Redis `EXPIRE` on each entry (pipelined with the write), not a check in application code
+- [x] Verified: RediSearch automatically drops an expired key from its index — confirmed directly, not assumed
+- [x] Verified: an entry that would've HIT at raw similarity now correctly MISSes once an artificially-aged timestamp pushes it below the decayed threshold
+- [x] Verified: an entry past the hard TTL is genuinely gone from both entry storage (`EXISTS`) and the RediSearch index (KNN search), not just skipped in application logic
+- [x] Verified: fresh (non-aged) exact-match/cosine-hit/dissimilar-miss behavior from Phase 3/5/7 unchanged
+- [x] Full pytest suite (9 tests) re-verified passing
+
+**Status:** Done, verified 2026-08-03 — see `phases/phase-8.md`. **Key numbers:** `CACHE_DECAY_RATE_PER_DAY=0.05` (5%/day, openly acknowledged as arbitrary), `CACHE_TTL_SECONDS=86400` (24h). Live test: the verified 0.9277-similarity password paraphrase pair HIT fresh, then MISSed once backdated 12 hours (`effective_score=0.9027 < 0.92`). Live test: a near-perfect (0.999 similarity) entry aged to 23.9 hours still passed the decayed threshold (`effective=0.9492`) — decay math alone would not have blocked it — while a real Redis TTL expiry (tested with a short substitute value) made an entry genuinely unreachable from both storage and the RediSearch index, confirming the hard TTL is the only unconditional guarantee.
 
 ### Stretch 4: Async Result Delivery
 - [ ] Not started

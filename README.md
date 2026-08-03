@@ -7,7 +7,7 @@ An asynchronous, multi-tenant ML inference gateway built in Python. It sits in f
 Most naive ML-serving setups run one inference call per request, with no protection against traffic spikes and no reuse of prior work. SemanticQueue adds three layers in front of the model, each solving a different part of that problem:
 
 1. **Rate limiting (token bucket, Redis-backed)** — protects the system from being overwhelmed before any expensive work starts.
-2. **Semantic caching** — before running the model, checks whether a *semantically similar* request has already been answered (via RediSearch's HNSW vector index over embeddings stored in Redis — not just exact string matching), and returns the cached result in milliseconds if so. Originally a brute-force NumPy cosine scan (Phase 3); replaced with real vector-index KNN search once Phase 6's load test measured exactly what that brute-force approach cost at scale — see `phases/phase-7.md`.
+2. **Semantic caching** — before running the model, checks whether a *semantically similar* request has already been answered (via RediSearch's HNSW vector index over embeddings stored in Redis — not just exact string matching), and returns the cached result in milliseconds if so. Originally a brute-force NumPy cosine scan (Phase 3); replaced with real vector-index KNN search once Phase 6's load test measured exactly what that brute-force approach cost at scale — see `phases/phase-7.md`. Cached results also age: a confidence-decay penalty makes older matches need a higher raw similarity to still count as a hit, and a hard TTL guarantees nothing is ever served past a fixed max age regardless of how good a match it looks like — see `phases/phase-8.md`.
 3. **Dynamic batching** — when a request does need the model, it's grouped with other concurrent requests into a batch (up to a size or time limit, whichever comes first) so the model runs more efficiently per request instead of one at a time.
 
 The result is a system that avoids redundant computation when it can, and makes the computation it does run as efficient as possible when it can't.
@@ -42,7 +42,7 @@ flowchart TD
 
 - **Language**: Python 3.12+
 - **API layer**: FastAPI, Uvicorn
-- **Store / cache / queue**: Redis Stack (`redis/redis-stack-server`, includes RediSearch) via `redis.asyncio` — rate-limit counters and the task queue use plain Redis commands; the semantic cache uses RediSearch's HNSW vector index (Stretch 5 / Phase 7, replacing an original brute-force NumPy scan from Phase 3)
+- **Store / cache / queue**: Redis Stack (`redis/redis-stack-server`, includes RediSearch) via `redis.asyncio` — rate-limit counters and the task queue use plain Redis commands; the semantic cache uses RediSearch's HNSW vector index (Stretch 5 / Phase 7, replacing an original brute-force NumPy scan from Phase 3), with confidence decay and a hard TTL on every entry (Stretch 3 / Phase 8)
 - **ML**: PyTorch, sentence-transformers (`all-MiniLM-L6-v2`), NumPy
 - **Infra**: Docker, Docker Compose
 - **Load testing**: Locust
@@ -50,7 +50,7 @@ flowchart TD
 
 ## Status
 
-Base project (all 6 phases) complete — see `plan.md` for the phased roadmap and `progress.md` for current status. Stretch 5 (RediSearch vector search, see below) is done; Stretches 1–4 not started.
+Base project (all 6 phases) complete — see `plan.md` for the phased roadmap and `progress.md` for current status. Stretch 5 (RediSearch vector search) and Stretch 3 (cache staleness/drift handling) are done; Stretches 1, 2, and 4 not started.
 
 ## Load test results (Phase 6, updated by Phase 7)
 

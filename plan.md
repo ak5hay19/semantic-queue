@@ -128,10 +128,17 @@ Do at most one fully; the rest can stay as "here's what I'd add next" talking po
 - Queue backing up → batch bigger/faster; queue quiet → don't force unnecessary wait
 - Talking point: batching adapts to load instead of being static
 
-### Stretch 3: Cache Staleness / Drift Handling
+### Stretch 3: Cache Staleness / Drift Handling — DONE, see `phases/phase-8.md`
 - Add TTL to cached entries, or a simple confidence-decay over time
 - Be ready to explain *why* this matters: semantic caches can return a stale-but-still-similar-looking answer for time-sensitive queries (e.g. "who is the CEO of X") even though the embedding hasn't changed
 - Talking point: shows awareness of a real, underdiscussed weakness of semantic caching
+- **Built both, not just one**: confidence decay (`effective_similarity = raw_similarity -
+  decay_rate * age_in_days`, applied to every lookup) as the primary mechanism, plus a hard
+  TTL (a real Redis `EXPIRE` on each entry, not a check in application code) as an
+  unconditional backstop for the case decay alone can't guarantee — a very-high-similarity
+  old entry that decay math would still let through. Both values (`decay_rate=0.05/day`,
+  `TTL=24h`) are openly acknowledged as arbitrary rather than principled; see `phases/phase-8.md`
+  for the reasoning and the live before/after evidence.
 
 ### Stretch 4: Async Result Delivery
 - `/v1/predict` optionally returns a `task_id` immediately (e.g. via a query param or header toggle) instead of holding the connection open

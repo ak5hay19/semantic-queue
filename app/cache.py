@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import time
 from dataclasses import dataclass
 
 import numpy as np
@@ -12,7 +13,12 @@ from redis.commands.search.query import Query
 from redis.exceptions import ResponseError
 from sentence_transformers import SentenceTransformer
 
-from config.settings import CACHE_EF_RUNTIME, EMBEDDING_DIM
+from config.settings import (
+    CACHE_DECAY_RATE_PER_DAY,
+    CACHE_EF_RUNTIME,
+    CACHE_TTL_SECONDS,
+    EMBEDDING_DIM,
+)
 
 logger = logging.getLogger("semantic_queue.cache")
 
@@ -27,9 +33,29 @@ _ENTRY_KEY_PREFIX = "cache:entry:"
 
 _INDEX_NAME = "cache_idx"
 
+_SECONDS_PER_DAY = 86400.0
+
 
 def _entry_id(text: str) -> str:
     return hashlib.sha256(text.strip().encode("utf-8")).hexdigest()
+
+
+def _decayed_similarity(raw_similarity: float, created_at) -> tuple[float, float]:
+    """Applies Phase 8's confidence-decay penalty: effective_similarity =
+    raw_similarity - (CACHE_DECAY_RATE_PER_DAY * age_in_days). Returns
+    (effective_similarity, age_in_days) so callers can log both.
+
+    An entry with no `created_at` field (only possible for data written
+    before Phase 8, or if that field is ever missing for some other
+    reason) is treated as maximally stale — age_in_days = infinity, so it
+    always fails the decayed threshold check and falls through to a real
+    lookup/recompute. Silently trusting an entry with no known age would
+    defeat the entire point of this mechanism.
+    """
+    if created_at is None:
+        return float("-inf"), float("inf")
+    age_days = (time.time() - float(created_at)) / _SECONDS_PER_DAY
+    return raw_similarity - CACHE_DECAY_RATE_PER_DAY * age_days, age_days
 
 
 @dataclass
@@ -105,23 +131,48 @@ class SemanticCache:
     async def lookup(self, text: str) -> CacheLookupResult:
         entry_id = _entry_id(text)
 
-        exact = await self.redis.hmget(f"{_ENTRY_KEY_PREFIX}{entry_id}", "result")
-        if exact[0] is not None:
+        exact_result, exact_created_at = await self.redis.hmget(
+            f"{_ENTRY_KEY_PREFIX}{entry_id}", "result", "created_at"
+        )
+        if exact_result is not None:
+            # An exact string match is raw_similarity = 1.0 by definition
+            # — put through the *same* decay formula as the cosine path
+            # rather than being treated as decay-immune, so confidence
+            # decay is the mechanism that actually does most of the work
+            # (per this phase's own "primary mechanism" framing) instead
+            # of relying on the hard TTL to catch exact repeats too.
+            effective, age_days = _decayed_similarity(1.0, exact_created_at)
+            if effective > self.threshold:
+                logger.info(
+                    "cache hit (exact)",
+                    extra={
+                        "event": "cache_lookup",
+                        "cache_status": "HIT",
+                        "method": "exact",
+                        "entry_id": entry_id,
+                        "age_days": round(age_days, 4),
+                        "effective_similarity": round(effective, 4),
+                    },
+                )
+                return CacheLookupResult(
+                    hit=True,
+                    method="exact",
+                    result=json.loads(exact_result),
+                    entry_id=entry_id,
+                    embedding=None,
+                    score=effective,
+                )
             logger.info(
-                "cache hit (exact)",
+                "exact match stale (decayed below threshold), falling through to cosine search",
                 extra={
                     "event": "cache_lookup",
-                    "cache_status": "HIT",
-                    "method": "exact",
+                    "cache_status": None,
+                    "method": "exact_stale",
                     "entry_id": entry_id,
+                    "age_days": round(age_days, 4),
+                    "effective_similarity": round(effective, 4),
+                    "threshold": self.threshold,
                 },
-            )
-            return CacheLookupResult(
-                hit=True,
-                method="exact",
-                result=json.loads(exact[0]),
-                entry_id=entry_id,
-                embedding=None,
             )
 
         query_vector = await self._embed(text)
@@ -145,7 +196,7 @@ class SemanticCache:
         query = (
             Query(f"*=>[KNN 1 @embedding $vec EF_RUNTIME {CACHE_EF_RUNTIME} AS score]")
             .sort_by("score")
-            .return_fields("score", "result")
+            .return_fields("score", "result", "created_at")
             .dialect(2)
         )
         search_result = await self._index.search(
@@ -154,9 +205,11 @@ class SemanticCache:
 
         if search_result.docs:
             doc = search_result.docs[0]
-            best_score = 1.0 - float(doc.score)
+            raw_score = 1.0 - float(doc.score)
+            doc_created_at = getattr(doc, "created_at", None)
+            effective_score, age_days = _decayed_similarity(raw_score, doc_created_at)
 
-            if best_score > self.threshold:
+            if effective_score > self.threshold:
                 matched_entry_id = doc.id[len(_ENTRY_KEY_PREFIX):]
                 logger.info(
                     "cache hit (cosine_similarity)",
@@ -166,7 +219,9 @@ class SemanticCache:
                         "method": "cosine_similarity",
                         "entry_id": entry_id,
                         "matched_entry_id": matched_entry_id,
-                        "score": round(best_score, 4),
+                        "raw_score": round(raw_score, 4),
+                        "age_days": round(age_days, 4),
+                        "effective_score": round(effective_score, 4),
                         "threshold": self.threshold,
                     },
                 )
@@ -176,7 +231,7 @@ class SemanticCache:
                     result=json.loads(doc.result),
                     entry_id=entry_id,
                     embedding=query_vector,
-                    score=best_score,
+                    score=effective_score,
                 )
 
             logger.info(
@@ -185,7 +240,9 @@ class SemanticCache:
                     "event": "cache_lookup",
                     "cache_status": "MISS",
                     "entry_id": entry_id,
-                    "best_score": round(best_score, 4),
+                    "raw_score": round(raw_score, 4),
+                    "age_days": round(age_days, 4),
+                    "effective_score": round(effective_score, 4),
                     "threshold": self.threshold,
                 },
             )
@@ -211,11 +268,26 @@ class SemanticCache:
     async def store(
         self, entry_id: str, text: str, result: dict, embedding: np.ndarray
     ) -> None:
-        await self.redis.hset(
-            f"{_ENTRY_KEY_PREFIX}{entry_id}",
+        # HSET + EXPIRE pipelined together: the hard TTL (Phase 8) is a
+        # real Redis expiration on the entry's own key, not a check in
+        # application code — once it fires, Redis deletes the key
+        # outright and RediSearch's index drops it automatically
+        # (verified directly, not assumed; see phases/phase-8.md), so a
+        # lookup genuinely cannot match against it anymore, and it's not
+        # left occupying space in the index or the keyspace either.
+        # Pipelining avoids a (small, low-stakes) window where the key
+        # would exist without a TTL if the process died between two
+        # separate round trips.
+        key = f"{_ENTRY_KEY_PREFIX}{entry_id}"
+        pipe = self.redis.pipeline()
+        pipe.hset(
+            key,
             mapping={
                 "text": text.encode("utf-8"),
                 "result": json.dumps(result).encode("utf-8"),
                 "embedding": np.asarray(embedding, dtype=np.float32).tobytes(),
+                "created_at": str(time.time()).encode("utf-8"),
             },
         )
+        pipe.expire(key, CACHE_TTL_SECONDS)
+        await pipe.execute()

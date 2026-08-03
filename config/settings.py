@@ -30,6 +30,23 @@ CACHE_SIMILARITY_THRESHOLD = float(os.environ.get("CACHE_SIMILARITY_THRESHOLD", 
 # trade-off at this project's scale — see phases/phase-7.md.
 CACHE_EF_RUNTIME = int(os.environ.get("CACHE_EF_RUNTIME", "300"))
 
+# Stretch 3 (Phase 8): confidence decay + hard TTL, on top of Phase 7's
+# RediSearch cache. Both values are necessarily somewhat arbitrary — no
+# real-world data-freshness study backs these numbers, and phases/phase-8.md
+# says so honestly rather than dressing them up as principled.
+#
+# CACHE_DECAY_RATE_PER_DAY: similarity points subtracted per day of entry
+# age before comparing against CACHE_SIMILARITY_THRESHOLD. 0.05/day means
+# a borderline match (~0.95 raw similarity) goes stale in under a day,
+# while a near-perfect match (~1.0) can still clear threshold right up
+# to the hard TTL below — see phases/phase-8.md for why that gap is
+# exactly the scenario the hard TTL exists to close.
+CACHE_DECAY_RATE_PER_DAY = float(os.environ.get("CACHE_DECAY_RATE_PER_DAY", "0.05"))
+# CACHE_TTL_SECONDS: unconditional expiration, enforced via a real Redis
+# TTL on the entry's own key (not a check in application code) — 24 hours
+# picked as a simple, round, easy-to-reason-about upper bound.
+CACHE_TTL_SECONDS = int(os.environ.get("CACHE_TTL_SECONDS", str(24 * 60 * 60)))
+
 # Redis List the API LPUSHes {task_id, entry_id, text} onto on a cache miss,
 # and the worker BRPOPs from to accumulate a batch.
 TASK_QUEUE_KEY = "ml_task_queue"
